@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BBNL FLT Booking & Restoration Portal</title>
+  <title>SSA OFC Fault Booking & Restoration Portal</title>
   <!-- Google Fonts for clean typography & mono numbers -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -545,7 +545,28 @@
 </head>
 <body>
 
-<div class="container">
+
+<section id="authPanel" class="card" style="max-width:520px;margin:36px auto;">
+  <div class="card-header">
+    <h2><i class="fa-solid fa-shield-halved text-primary"></i> SSA Engineer Login</h2>
+  </div>
+  <p style="color:var(--muted);font-size:.9rem;margin-bottom:16px;">Sign in to access the shared SSA OFC fault register. All authenticated engineers have the same add, restore, edit and delete permissions.</p>
+  <div class="form-group" style="margin-bottom:12px;">
+    <label for="authEmail">Email address</label>
+    <input id="authEmail" type="email" autocomplete="username" required placeholder="engineer@example.com">
+  </div>
+  <div class="form-group" style="margin-bottom:14px;">
+    <label for="authPassword">Password</label>
+    <input id="authPassword" type="password" autocomplete="current-password" required minlength="6" placeholder="At least 6 characters">
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <button class="btn btn-primary" type="button" onclick="signIn()">Sign In</button>
+    <button class="btn btn-outline" type="button" onclick="signUp()">Create Engineer Account</button>
+  </div>
+  <p id="authMessage" role="status" style="margin-top:14px;color:var(--muted);font-size:.85rem;"></p>
+</section>
+
+<div class="container" id="appContainer" style="display:none;">
 
   <!-- Main System Header -->
   <header>
@@ -554,7 +575,7 @@
         <i class="fa-solid fa-tower-broadcast"></i>
       </div>
       <div>
-        <h1>BBNL Fault (FLT) Booking & Restoration Portal</h1>
+        <h1>SSA OFC Fault Booking & Restoration Portal</h1>
         <p>Real-time outage tracking, telecom dispatch, and resolution lifecycle</p>
       </div>
     </div>
@@ -569,8 +590,14 @@
         </div>
       </div>
 
+      <span id="cloudStatus" class="btn btn-outline" style="pointer-events:none;">Connecting to cloud…</span>
+      <span id="signedInAs" style="font-size:.8rem;color:var(--muted);"></span>
+      <button class="btn btn-outline" onclick="migrateLocalRecords()" title="Import old records saved in this browser">Import Old Local Records</button>
       <button class="btn btn-outline" onclick="exportToCSV()" title="Export all logged records to CSV">
         <i class="fa-solid fa-file-csv text-primary"></i> Export Report (CSV)
+      </button>
+      <button class="btn btn-danger" onclick="signOut()" title="Sign out">
+        <i class="fa-solid fa-right-from-bracket"></i> Sign Out
       </button>
     </div>
   </header>
@@ -770,219 +797,226 @@
 <!-- Toast Container for Notifications -->
 <div class="toast-container" id="toastContainer"></div>
 
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="./supabase-config.js"></script>
 <script>
-  /* =====================================================================
-     1. STORAGE & INITIAL DATA SEEDING
-     ===================================================================== */
+  // Cloud-first SSA fault register. Supabase is the source of truth.
   const STORAGE_KEY = 'fault_records_data_v2';
-
-  // Seed sample initial records with exact seconds HH:mm:ss
-  const initialData = [
-    {
-      sno: 1,
-      faultType: 'OFC Cut',
-      firstSite: 'SITE-010',
-      mandal: 'North Sector',
-      noOfSitesDown: 4,
-      faultTime: '2026-11-10T08:30:15',
-      restoredTime: '2026-11-10T12:45:30',
-      duration: '04:15:15',
-      faultReason: 'Fiber severed during road widening work; spliced and re-routed.',
-      status: 'RESTORED'
-    },
-    {
-      sno: 2,
-      faultType: 'Power Failure',
-      firstSite: 'SITE-022',
-      mandal: 'East Ward',
-      noOfSitesDown: 2,
-      faultTime: '2026-11-11T09:12:00',
-      restoredTime: '',
-      duration: '--',
-      faultReason: '--',
-      status: 'OPEN'
-    },
-    {
-      sno: 3,
-      faultType: 'BBU Card Failure',
-      firstSite: 'SITE-088',
-      mandal: 'Downtown Hub',
-      noOfSitesDown: 1,
-      faultTime: '2026-11-11T10:45:22',
-      restoredTime: '',
-      duration: '--',
-      faultReason: '--',
-      status: 'OPEN'
-    }
-  ];
-
+  const SUPABASE_URL = window.SUPABASE_URL || '';
+  const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || '';
+  let supabaseClient = null;
+  let currentUser = null;
   let faultList = [];
+  let realtimeChannel = null;
 
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    faultList = stored ? JSON.parse(stored) : initialData;
-  } catch (err) {
-    faultList = initialData;
+  function setCloudStatus(message, kind = 'info') {
+    const el = document.getElementById('cloudStatus');
+    if (!el) return;
+    el.textContent = message;
+    el.style.color = kind === 'error' ? '#b91c1c' : kind === 'success' ? '#15803d' : 'var(--muted)';
   }
 
-  function persistData() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(faultList));
-    } catch (e) {
-      console.error('Storage quota exceeded or unavailable', e);
+  function authMessage(message, isError = false) {
+    const el = document.getElementById('authMessage');
+    if (el) {
+      el.textContent = message;
+      el.style.color = isError ? '#b91c1c' : 'var(--muted)';
     }
+  }
+
+  function requireCloudConfig() {
+    if (!window.supabase || !SUPABASE_URL || !SUPABASE_ANON_KEY ||
+        SUPABASE_URL.includes('YOUR_') || SUPABASE_ANON_KEY.includes('YOUR_')) {
+      document.getElementById('authPanel').style.display = 'block';
+      document.getElementById('appContainer').style.display = 'none';
+      authMessage('Setup required: add your Supabase Project URL and anon/public key in supabase-config.js.', true);
+      setCloudStatus('Cloud not configured', 'error');
+      return false;
+    }
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
+    return true;
+  }
+
+  async function signIn() {
+    if (!supabaseClient) return authMessage('Please configure Supabase first.', true);
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    if (!email || !password) return authMessage('Enter email and password.', true);
+    authMessage('Signing in…');
+    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) authMessage(error.message, true);
+  }
+
+  async function signUp() {
+    if (!supabaseClient) return authMessage('Please configure Supabase first.', true);
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    if (!email || !password || password.length < 6) return authMessage('Enter a valid email and a password of at least 6 characters.', true);
+    authMessage('Creating account…');
+    const { data, error } = await supabaseClient.auth.signUp({ email, password });
+    if (error) return authMessage(error.message, true);
+    if (data.session) authMessage('Account created. You are signed in.');
+    else authMessage('Account created. Check your email for the confirmation link, then sign in.');
+  }
+
+  async function signOut() {
+    if (!supabaseClient) return;
+    if (realtimeChannel) await supabaseClient.removeChannel(realtimeChannel);
+    await supabaseClient.auth.signOut();
+    currentUser = null;
+    faultList = [];
+    document.getElementById('appContainer').style.display = 'none';
+    document.getElementById('authPanel').style.display = 'block';
+    document.getElementById('signedInAs').textContent = '';
+    setCloudStatus('Signed out');
+  }
+
+  function showApplication(user) {
+    currentUser = user;
+    document.getElementById('authPanel').style.display = 'none';
+    document.getElementById('appContainer').style.display = 'block';
+    document.getElementById('signedInAs').textContent = user.email || 'Signed in';
+    setCloudStatus('Connected', 'success');
+  }
+
+  function toUiRecord(row) {
+    return {
+      sno: row.id,
+      faultType: row.fault_type || '',
+      firstSite: row.first_site || '',
+      mandal: row.mandal || '',
+      noOfSitesDown: Number(row.sites_down || 1),
+      faultTime: row.fault_time,
+      restoredTime: row.restored_time || '',
+      duration: row.restored_time ? calculateDuration(row.fault_time, row.restored_time) : '--',
+      faultReason: row.fault_reason || '--',
+      status: row.restored_time ? 'RESTORED' : 'OPEN'
+    };
+  }
+
+  function toDbRecord(fault) {
+    return {
+      fault_type: fault.faultType,
+      first_site: fault.firstSite,
+      mandal: fault.mandal,
+      sites_down: Number(fault.noOfSitesDown),
+      fault_time: new Date(fault.faultTime).toISOString(),
+      restored_time: fault.restoredTime ? new Date(fault.restoredTime).toISOString() : null,
+      fault_reason: fault.faultReason === '--' ? '' : (fault.faultReason || '')
+    };
+  }
+
+  async function loadFaults(showMessage = false) {
+    if (!supabaseClient || !currentUser) return;
+    setCloudStatus('Loading shared records…');
+    const { data, error } = await supabaseClient
+      .from('ofc_faults')
+      .select('*')
+      .order('fault_time', { ascending: false });
+    if (error) {
+      setCloudStatus('Cloud read failed', 'error');
+      showToast('Unable to load cloud records: ' + error.message, 'danger');
+      return;
+    }
+    faultList = (data || []).map(toUiRecord);
+    renderTable();
+    setCloudStatus('Cloud synced · ' + faultList.length + ' records', 'success');
+    if (showMessage) showToast('Shared SSA fault records loaded.', 'success');
+  }
+
+  function subscribeToFaultChanges() {
+    if (!supabaseClient || !currentUser) return;
+    if (realtimeChannel) supabaseClient.removeChannel(realtimeChannel);
+    realtimeChannel = supabaseClient.channel('ssa-ofc-faults-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ofc_faults' }, () => {
+        loadFaults(false);
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') setCloudStatus('Live cloud sync enabled', 'success');
+      });
+  }
+
+  async function persistData() {
+    // Kept as a compatibility helper; all actual writes are made with explicit DB calls.
     updateStats();
   }
 
-  /* =====================================================================
-     2. TIME UTILITIES (STRICT HH:mm:ss FORMAT)
-     ===================================================================== */
-  function pad2(num) {
-    return String(num).padStart(2, '0');
-  }
+  function pad2(num) { return String(num).padStart(2, '0'); }
 
-  // Returns YYYY-MM-DDTHH:mm:ss formatted for <input type="datetime-local" step="1">
   function formatForDateTimeInput(date = new Date()) {
-    const yyyy = date.getFullYear();
-    const mm = pad2(date.getMonth() + 1);
-    const dd = pad2(date.getDate());
-    const hh = pad2(date.getHours());
-    const min = pad2(date.getMinutes());
-    const ss = pad2(date.getSeconds());
-    return `${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}`;
+    return `${date.getFullYear()}-${pad2(date.getMonth()+1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
   }
 
-  // Formats stored ISO/datetime string into visible "YYYY-MM-DD HH:mm:ss"
   function formatDisplayDateTime(isoStr) {
     if (!isoStr) return '--';
     const d = new Date(isoStr);
-    if (isNaN(d.getTime())) {
-      // In case string is already formatted or raw
-      return isoStr.replace('T', ' ');
-    }
-    const yyyy = d.getFullYear();
-    const mm = pad2(d.getMonth() + 1);
-    const dd = pad2(d.getDate());
-    const hh = pad2(d.getHours());
-    const min = pad2(d.getMinutes());
-    const ss = pad2(d.getSeconds());
-    return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+    if (isNaN(d.getTime())) return String(isoStr).replace('T', ' ');
+    return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   }
 
-  // Calculate duration between two ISO datetime strings in strict HH:mm:ss
   function calculateDuration(startStr, endStr) {
     if (!startStr || !endStr) return '--';
-    const start = new Date(startStr);
-    const end = new Date(endStr);
-    const diffMs = end.getTime() - start.getTime();
-
-    if (isNaN(diffMs)) return '--';
+    const diffMs = new Date(endStr).getTime() - new Date(startStr).getTime();
+    if (!Number.isFinite(diffMs)) return '--';
     if (diffMs < 0) return 'Invalid Range';
-
-    const totalSeconds = Math.floor(diffMs / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-
-    return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
+    const seconds = Math.floor(diffMs / 1000);
+    return `${pad2(Math.floor(seconds/3600))}:${pad2(Math.floor((seconds%3600)/60))}:${pad2(seconds%60)}`;
   }
 
-  // Update live ticking clock in the header
   function updateLiveClock() {
     const now = new Date();
-    const clockElem = document.getElementById('liveClockDisplay');
-    if (clockElem) {
-      const hh = pad2(now.getHours());
-      const min = pad2(now.getMinutes());
-      const ss = pad2(now.getSeconds());
-      clockElem.innerText = `${hh}:${min}:${ss}`;
-    }
+    const el = document.getElementById('liveClockDisplay');
+    if (el) el.textContent = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
   }
 
   function setBookingTimeToNow() {
-    const faultTimeInput = document.getElementById('faultTime');
-    if (faultTimeInput) {
-      faultTimeInput.value = formatForDateTimeInput(new Date());
-    }
+    const el = document.getElementById('faultTime');
+    if (el) el.value = formatForDateTimeInput(new Date());
   }
 
   function stampModalRestoreTimeToNow() {
-    const restoredInput = document.getElementById('restoredTime');
-    if (restoredInput) {
-      restoredInput.value = formatForDateTimeInput(new Date());
-    }
+    const el = document.getElementById('restoredTime');
+    if (el) el.value = formatForDateTimeInput(new Date());
   }
 
-  /* =====================================================================
-     3. RENDER TABLE & KPIS
-     ===================================================================== */
   function renderTable() {
     const tbody = document.getElementById('faultsTableBody');
+    if (!tbody) return;
     const filter = document.getElementById('statusFilter').value;
     const search = document.getElementById('searchInput').value.toLowerCase().trim();
-
     tbody.innerHTML = '';
-
     const filtered = faultList.filter(item => {
-      const matchFilter = filter === 'ALL' || item.status === filter;
-      const matchSearch =
-        item.firstSite.toLowerCase().includes(search) ||
-        item.mandal.toLowerCase().includes(search) ||
-        item.faultLocation.toLowerCase().includes(search) ||
-        item.faultType.toLowerCase().includes(search) ||
-        String(item.sno).includes(search);
-      return matchFilter && matchSearch;
+      const text = [item.firstSite, item.mandal, item.faultType, item.faultReason, String(item.sno)].join(' ').toLowerCase();
+      return (filter === 'ALL' || item.status === filter) && text.includes(search);
     });
-
-    if (filtered.length === 0) {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="12" style="text-align: center; color: var(--muted); padding: 32px;">
-            <i class="fa-regular fa-folder-open" style="font-size: 1.8rem; display: block; margin-bottom: 8px;"></i>
-            No fault records match the specified filters.
-          </td>
-        </tr>`;
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:32px;">No fault records match the specified filters.</td></tr>`;
     } else {
       filtered.forEach(fault => {
         const tr = document.createElement('tr');
-        const isClosed = fault.status === 'RESTORED';
-
+        const closed = fault.status === 'RESTORED';
         tr.innerHTML = `
           <td class="font-mono"><strong>#${fault.sno}</strong></td>
-          <td>
-            <span class="badge ${isClosed ? 'badge-closed' : 'badge-open'}">
-              <span class="dot"></span>
-              ${fault.status}
-            </span>
-          </td>
+          <td><span class="badge ${closed ? 'badge-closed' : 'badge-open'}"><span class="dot"></span>${fault.status}</span></td>
           <td><strong>${escapeHtml(fault.faultType)}</strong></td>
-          <td class="font-mono" style="font-weight: 700; color: var(--primary);">${escapeHtml(fault.firstSite)}</td>
+          <td class="font-mono" style="font-weight:700;color:var(--primary);">${escapeHtml(fault.firstSite)}</td>
           <td>${escapeHtml(fault.mandal)}</td>
-          <td style="text-align: center; font-weight: 600;">${fault.noOfSitesDown}</td>
+          <td style="text-align:center;font-weight:600;">${fault.noOfSitesDown}</td>
           <td class="time-cell">${formatDisplayDateTime(fault.faultTime)}</td>
-          <td class="time-cell">${isClosed ? formatDisplayDateTime(fault.restoredTime) : '<span style="color: var(--muted); font-style: italic;">In Progress</span>'}</td>
-          <td>
-            <span class="${isClosed ? 'duration-cell' : 'font-mono'}" style="${!isClosed ? 'color: var(--muted); font-size: 0.8rem;' : ''}">
-              ${escapeHtml(fault.duration)}
-            </span>
-          </td>
+          <td class="time-cell">${closed ? formatDisplayDateTime(fault.restoredTime) : '<span style="color:var(--muted);font-style:italic;">In Progress</span>'}</td>
+          <td><span class="${closed ? 'duration-cell' : 'font-mono'}">${escapeHtml(fault.duration)}</span></td>
           <td class="reason-cell" title="${escapeHtml(fault.faultReason)}">${escapeHtml(fault.faultReason)}</td>
-          <td style="text-align: right;">
-            ${!isClosed 
-              ? `<button class="btn btn-success btn-sm" onclick="openRestoreModal(${fault.sno})">
-                   <i class="fa-solid fa-screwdriver-wrench"></i> Restore
-                 </button>` 
-              : `<button class="btn btn-danger btn-sm" onclick="promptDeleteModal(${fault.sno})">
-                   <i class="fa-solid fa-trash"></i> Delete
-                 </button>`
-            }
-          </td>
-        `;
+          <td style="text-align:right;">
+            <button class="btn btn-success btn-sm" onclick="openRestoreModal(${fault.sno})"><i class="fa-solid fa-screwdriver-wrench"></i> ${closed ? 'Edit / Restore' : 'Restore'}</button>
+            <button class="btn btn-danger btn-sm" onclick="promptDeleteModal(${fault.sno})"><i class="fa-solid fa-trash"></i> Delete</button>
+          </td>`;
         tbody.appendChild(tr);
       });
     }
-
-    document.getElementById('recordCountSummary').innerText = `Showing ${filtered.length} of ${faultList.length} incident records`;
+    document.getElementById('recordCountSummary').innerText = `Showing ${filtered.length} of ${faultList.length} shared SSA incident records`;
     updateStats();
   }
 
@@ -990,227 +1024,170 @@
     const total = faultList.length;
     const open = faultList.filter(f => f.status === 'OPEN').length;
     const restored = faultList.filter(f => f.status === 'RESTORED').length;
-    const totalSites = faultList
-      .filter(f => f.status === 'OPEN')
-      .reduce((sum, f) => sum + (Number(f.noOfSitesDown) || 0), 0);
-
+    const sites = faultList.filter(f => f.status === 'OPEN').reduce((sum,f) => sum + (Number(f.noOfSitesDown)||0), 0);
     document.getElementById('statTotal').innerText = total;
     document.getElementById('statOpen').innerText = open;
     document.getElementById('statRestored').innerText = restored;
-    document.getElementById('statAffectedSites').innerText = totalSites;
+    document.getElementById('statAffectedSites').innerText = sites;
   }
 
-  /* =====================================================================
-     4. BOOKING NEW FAULT
-     ===================================================================== */
-  function handleFaultBooking(e) {
+  async function handleFaultBooking(e) {
     e.preventDefault();
-
-    const faultType = document.getElementById('faultType').value.trim();
-    const firstSite = document.getElementById('firstSite').value.trim().toUpperCase();
-    const mandal = document.getElementById('mandal').value.trim();
-    const noOfSitesDown = Number(document.getElementById('noOfSitesDown').value);
-    const faultTime = document.getElementById('faultTime').value;
-
-    if (!faultTime) {
-      showToast('Please select or stamp the Fault Time with HH:mm:ss precision', 'danger');
-      return;
-    }
-
-    const nextSno = faultList.length > 0 ? Math.max(...faultList.map(f => f.sno)) + 1 : 1;
-
-    const newFault = {
-      sno: nextSno,
-      faultType,
-      firstSite,
-      mandal,
-      noOfSitesDown,
-      faultTime,
+    const fault = {
+      faultType: document.getElementById('faultType').value.trim(),
+      firstSite: document.getElementById('firstSite').value.trim().toUpperCase(),
+      mandal: document.getElementById('mandal').value.trim(),
+      noOfSitesDown: Number(document.getElementById('noOfSitesDown').value),
+      faultTime: document.getElementById('faultTime').value,
       restoredTime: '',
       duration: '--',
       faultReason: '--',
       status: 'OPEN'
     };
-
-    faultList.unshift(newFault);
-    persistData();
-    renderTable();
-
-    // Reset Form
+    if (!fault.faultTime || !fault.faultType || !fault.firstSite || !fault.mandal || fault.noOfSitesDown < 1) {
+      showToast('Please complete all required fault fields.', 'danger'); return;
+    }
+    const { data, error } = await supabaseClient.from('ofc_faults').insert(toDbRecord(fault)).select().single();
+    if (error) { showToast('Fault not saved: ' + error.message, 'danger'); return; }
     e.target.reset();
     setBookingTimeToNow();
-    showToast(`Fault #${nextSno} booked successfully for Site ${firstSite}`, 'success');
+    await loadFaults(false);
+    showToast(`Fault #${data.id} booked and shared with SSA engineers.`, 'success');
   }
 
-  /* =====================================================================
-     5. CLOSING & RESTORING FAULT
-     ===================================================================== */
   function openRestoreModal(sno) {
     const fault = faultList.find(f => f.sno === sno);
     if (!fault) return;
-
     document.getElementById('activeCloseSno').value = sno;
-    document.getElementById('modalTitle').innerText = `Restore Fault #${fault.sno}`;
+    document.getElementById('modalTitle').innerText = `${fault.status === 'RESTORED' ? 'Edit restoration' : 'Restore'} Fault #${fault.sno}`;
     document.getElementById('modalSubtitle').innerText = `Site: ${fault.firstSite} | Mandal: ${fault.mandal} | Fault Time: ${formatDisplayDateTime(fault.faultTime)}`;
-
-    // Set Restored Time default to current time with HH:mm:ss
-    const restoredInput = document.getElementById('restoredTime');
-    restoredInput.value = formatForDateTimeInput(new Date());
-    restoredInput.min = fault.faultTime; // Can't restore before fault start
-
-    document.getElementById('faultReason').value = '';
+    const input = document.getElementById('restoredTime');
+    input.value = fault.restoredTime ? formatForDateTimeInput(new Date(fault.restoredTime)) : formatForDateTimeInput(new Date());
+    input.min = formatForDateTimeInput(new Date(fault.faultTime));
+    document.getElementById('faultReason').value = fault.faultReason === '--' ? '' : fault.faultReason;
     document.getElementById('closeModal').classList.add('active');
   }
 
-  function closeRestoreModal() {
-    document.getElementById('closeModal').classList.remove('active');
-  }
+  function closeRestoreModal() { document.getElementById('closeModal').classList.remove('active'); }
 
-  function handleFaultClosure(e) {
+  async function handleFaultClosure(e) {
     e.preventDefault();
-    const sno = Number(document.getElementById('activeCloseSno').value);
+    const id = Number(document.getElementById('activeCloseSno').value);
     const restoredTime = document.getElementById('restoredTime').value;
     const reason = document.getElementById('faultReason').value.trim();
-
-    const fault = faultList.find(f => f.sno === sno);
-    if (!fault) return;
-
-    if (!restoredTime) {
-      showToast('Restoration time is required.', 'danger');
-      return;
-    }
-
-    if (new Date(restoredTime) < new Date(fault.faultTime)) {
-      showToast('Restoration time cannot be earlier than Fault occurrence time.', 'danger');
-      return;
-    }
-
-    fault.restoredTime = restoredTime;
-    fault.faultReason = reason;
-    fault.duration = calculateDuration(fault.faultTime, restoredTime);
-    fault.status = 'RESTORED';
-
-    persistData();
-    renderTable();
+    const fault = faultList.find(f => f.sno === id);
+    if (!fault || !restoredTime || !reason) { showToast('Restoration time and fault reason are required.', 'danger'); return; }
+    if (new Date(restoredTime) < new Date(fault.faultTime)) { showToast('Restoration time cannot be before fault time.', 'danger'); return; }
+    const patch = {
+      restored_time: new Date(restoredTime).toISOString(),
+      fault_reason: reason,
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await supabaseClient.from('ofc_faults').update(patch).eq('id', id);
+    if (error) { showToast('Update failed: ' + error.message, 'danger'); return; }
     closeRestoreModal();
-    showToast(`Fault #${fault.sno} restored. Duration: ${fault.duration}`, 'success');
+    await loadFaults(false);
+    showToast(`Fault #${id} restoration saved to shared SSA database.`, 'success');
   }
 
-  /* =====================================================================
-     6. DELETING FAULT (Custom Modal, No alert/confirm)
-     ===================================================================== */
   function promptDeleteModal(sno) {
     const fault = faultList.find(f => f.sno === sno);
     if (!fault) return;
-
     document.getElementById('activeDeleteSno').value = sno;
-    document.getElementById('deleteModalSubtitle').innerText = `Are you sure you want to delete Fault #${fault.sno} (${fault.firstSite} - ${fault.faultType})?`;
+    document.getElementById('deleteModalSubtitle').innerText = `Delete Fault #${fault.sno} (${fault.firstSite} - ${fault.faultType}) from the shared SSA register?`;
     document.getElementById('deleteModal').classList.add('active');
   }
+  function closeDeleteModal() { document.getElementById('deleteModal').classList.remove('active'); }
 
-  function closeDeleteModal() {
-    document.getElementById('deleteModal').classList.remove('active');
-  }
-
-  function confirmDeleteFault() {
-    const sno = Number(document.getElementById('activeDeleteSno').value);
-    faultList = faultList.filter(f => f.sno !== sno);
-    persistData();
-    renderTable();
+  async function confirmDeleteFault() {
+    const id = Number(document.getElementById('activeDeleteSno').value);
+    const { error } = await supabaseClient.from('ofc_faults').delete().eq('id', id);
+    if (error) { showToast('Delete failed: ' + error.message, 'danger'); return; }
     closeDeleteModal();
-    showToast(`Record #${sno} has been deleted.`, 'warning');
+    await loadFaults(false);
+    showToast(`Fault #${id} deleted from shared SSA register.`, 'warning');
   }
 
-  /* =====================================================================
-     7. CSV EXPORT UTILITY
-     ===================================================================== */
   function exportToCSV() {
-    if (faultList.length === 0) {
-      showToast('No records available for export.', 'warning');
-      return;
-    }
-
-    const headers = [
-      "S.No",
-      "Status",
-      "Fault Type",
-      "First Site",
-      "MANDAL",
-      "No of Sites Down",
-      "Fault Time (HH:mm:ss)",
-      "Restored Time (HH:mm:ss)",
-      "Duration (HH:mm:ss)",
-      "Fault Reason"
-    ];
-
-    const rows = faultList.map(f => [
-      f.sno,
-      f.status,
-      `"${(f.faultType || '').replace(/"/g, '""')}"`,
-       `"${(f.firstSite || '').replace(/"/g, '""')}"`,
-      `"${(f.mandal || '').replace(/"/g, '""')}"`,
-      f.noOfSitesDown,
-      `"${formatDisplayDateTime(f.faultTime)}"`,
-      `"${f.restoredTime ? formatDisplayDateTime(f.restoredTime) : '--'}"`,
-      `"${f.duration}"`,
-      `"${(f.faultReason || '').replace(/"/g, '""')}"`
-    ]);
-
-    const csvContent = "data:text/csv;charset=utf-8,\uFEFF" 
-      + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    const dateStamp = new Date().toISOString().slice(0, 10);
-    link.setAttribute("download", `FLT_fault_report_${dateStamp}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    showToast('Fault records CSV exported successfully.', 'success');
+    if (!faultList.length) { showToast('No records available for export.', 'warning'); return; }
+    const headers = ['S.No','Status','Fault Type','First Site','MANDAL','No of Sites Down','Fault Time','Restored Time','Duration','Fault Reason'];
+    const quote = value => '"' + String(value ?? '').replace(/"/g, '""') + '"';
+    const rows = faultList.map(f => [f.sno,f.status,f.faultType,f.firstSite,f.mandal,f.noOfSitesDown,formatDisplayDateTime(f.faultTime),f.restoredTime ? formatDisplayDateTime(f.restoredTime) : '--',f.duration,f.faultReason].map(quote));
+    const blob = new Blob(['\uFEFF' + [headers.map(quote).join(','), ...rows.map(r=>r.join(','))].join('\r\n')], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `SSA_OFC_fault_report_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    showToast('Shared SSA fault report exported.', 'success');
   }
 
-  /* =====================================================================
-     8. NON-INTRUSIVE TOAST NOTIFICATIONS
-     ===================================================================== */
   function showToast(message, type = 'info') {
     const container = document.getElementById('toastContainer');
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-
-    let icon = 'fa-info-circle';
-    if (type === 'success') icon = 'fa-circle-check';
-    if (type === 'danger') icon = 'fa-circle-xmark';
-    if (type === 'warning') icon = 'fa-triangle-exclamation';
-
+    const icon = type === 'success' ? 'fa-circle-check' : type === 'danger' ? 'fa-circle-xmark' : type === 'warning' ? 'fa-triangle-exclamation' : 'fa-info-circle';
     toast.innerHTML = `<i class="fa-solid ${icon}"></i> <span>${escapeHtml(message)}</span>`;
     container.appendChild(toast);
-
-    setTimeout(() => {
-      toast.style.opacity = '0';
-      toast.style.transform = 'translateY(10px)';
-      setTimeout(() => toast.remove(), 300);
-    }, 3800);
+    setTimeout(() => { toast.style.opacity='0'; toast.style.transform='translateY(10px)'; setTimeout(()=>toast.remove(),300); }, 3800);
   }
 
-  function escapeHtml(str) {
-    if (!str && str !== 0) return '';
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
   }
 
-  /* =====================================================================
-     9. LIFECYCLE INITIALIZATION
-     ===================================================================== */
-  window.addEventListener('DOMContentLoaded', () => {
+  async function migrateLocalRecords() {
+    if (!currentUser) return;
+    let oldRecords = [];
+    try { oldRecords = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch (_) {}
+    if (!Array.isArray(oldRecords) || !oldRecords.length) {
+      showToast('No old browser records found to import.', 'warning'); return;
+    }
+    const marker = 'fault_records_migrated_to_supabase_v1';
+    if (localStorage.getItem(marker)) {
+      showToast('This browser has already completed its migration attempt.', 'warning'); return;
+    }
+    const rows = oldRecords.filter(r => r && r.faultType && r.firstSite && r.mandal && r.faultTime).map(r => ({
+      fault_type: r.faultType,
+      first_site: r.firstSite,
+      mandal: r.mandal,
+      sites_down: Number(r.noOfSitesDown || 1),
+      fault_time: new Date(r.faultTime).toISOString(),
+      restored_time: r.restoredTime ? new Date(r.restoredTime).toISOString() : null,
+      fault_reason: r.faultReason && r.faultReason !== '--' ? r.faultReason : ''
+    }));
+    if (!rows.length) { showToast('No valid legacy records found.', 'warning'); return; }
+    if (!confirm(`Import ${rows.length} records from THIS browser into the shared SSA database? Review first to avoid importing sample records or duplicates.`)) return;
+    const { error } = await supabaseClient.from('ofc_faults').insert(rows);
+    if (error) { showToast('Import failed: ' + error.message, 'danger'); return; }
+    localStorage.setItem(marker, 'yes');
+    await loadFaults(false);
+    showToast(`${rows.length} legacy records imported. Original browser copy was retained.`, 'success');
+  }
+
+  window.addEventListener('DOMContentLoaded', async () => {
     updateLiveClock();
     setInterval(updateLiveClock, 1000);
     setBookingTimeToNow();
-    renderTable();
+    if (!requireCloudConfig()) return;
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (session?.user) {
+      showApplication(session.user);
+      await loadFaults(false);
+      subscribeToFaultChanges();
+    }
+    supabaseClient.auth.onAuthStateChange(async (_event, sessionNow) => {
+      if (sessionNow?.user) {
+        showApplication(sessionNow.user);
+        await loadFaults(false);
+        subscribeToFaultChanges();
+      } else {
+        currentUser = null;
+        faultList = [];
+        document.getElementById('appContainer').style.display = 'none';
+        document.getElementById('authPanel').style.display = 'block';
+      }
+    });
   });
 </script>
 

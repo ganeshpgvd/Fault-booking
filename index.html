@@ -778,8 +778,43 @@
 
   // Seed sample initial records with exact seconds HH:mm:ss
   const initialData = [
-   
-      
+    {
+      sno: 1,
+      faultType: 'OFC Cut',
+      firstSite: 'SITE-010',
+      mandal: 'North Sector',
+      noOfSitesDown: 4,
+      faultTime: '2026-11-10T08:30:15',
+      restoredTime: '2026-11-10T12:45:30',
+      duration: '04:15:15',
+      faultReason: 'Fiber severed during road widening work; spliced and re-routed.',
+      status: 'RESTORED'
+    },
+    {
+      sno: 2,
+      faultType: 'Power Failure',
+      firstSite: 'SITE-022',
+      mandal: 'East Ward',
+      noOfSitesDown: 2,
+      faultTime: '2026-11-11T09:12:00',
+      restoredTime: '',
+      duration: '--',
+      faultReason: '--',
+      status: 'OPEN'
+    },
+    {
+      sno: 3,
+      faultType: 'BBU Card Failure',
+      firstSite: 'SITE-088',
+      mandal: 'Downtown Hub',
+      noOfSitesDown: 1,
+      faultTime: '2026-11-11T10:45:22',
+      restoredTime: '',
+      duration: '--',
+      faultReason: '--',
+      status: 'OPEN'
+    }
+  ];
 
   let faultList = [];
 
